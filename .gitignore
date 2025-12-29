@@ -1,0 +1,39 @@
+# Data files (large NetCDF files)
+data_sst/
+data_sst_indo/
+*.nc
+*.data.txt
+
+# Output/Results
+*.csv
+*.png
+
+# Jupyter Notebooks (optional - checkpoints)
+.ipynb_checkpoints/
+*.ipynb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
