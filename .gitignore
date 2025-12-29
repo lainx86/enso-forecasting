@@ -2,15 +2,6 @@
 data_sst/
 data_sst_indo/
 *.nc
-*.data.txt
-
-# Output/Results
-*.csv
-*.png
-
-# Jupyter Notebooks (optional - checkpoints)
-.ipynb_checkpoints/
-*.ipynb
 
 # Python
 __pycache__/
@@ -27,6 +18,9 @@ build/
 venv/
 env/
 .venv/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # IDE
 .vscode/
