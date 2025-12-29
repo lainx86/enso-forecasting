@@ -5,7 +5,7 @@ This script performs TRUE out-of-sample validation:
 1. Training on processed data from 2000-2023 (sst_indo_clean.csv)
 2. Testing on 2024 data loaded DIRECTLY from raw NetCDF (never seen during training)
 
-Author: Data Science Portfolio Project
+Author: Feby - For Data Science Portfolio Project
 Date: December 2024
 """
 
