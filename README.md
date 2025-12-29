@@ -43,10 +43,9 @@ enso-forecasting/
 ### Raw NetCDF Data (Not Included)
 Folder `data_sst/` berisi file NetCDF mentah dari NOAA (~500MB per file) yang **tidak di-upload ke GitHub** karena ukurannya terlalu besar.
 
-Untuk mendownload data, jalankan:
-```bash
-python download_data.py
-```
+**Workflow:**
+1. `download_data.py` → Download data NetCDF dari NOAA ke folder `data_sst/`
+2. `preprocessing.py` → Olah data NetCDF menjadi `data/processed/sst_indo_clean.csv`
 
 ---
 
