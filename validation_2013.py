@@ -229,13 +229,17 @@ def train_model(model, train_loader, epochs, lr):
 # VISUALIZATION
 # ============================================================================
 
-def plot_2013_validation(actual, predicted, dates, rmse, train_losses):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), dpi=100)
+def plot_2013_validation(actual, predicted, dates, nino34, rmse, train_losses):
+    """Create visualization with 3 subplots: SST comparison, Niño 3.4, and training loss."""
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), dpi=100)
     
-    ax1 = axes[0]
     month_labels = [d.strftime('%b %Y') for d in dates]
     x_pos = range(len(dates))
     
+    # -------------------------------------------------------------------------
+    # Plot 1: SST Actual vs Predicted
+    # -------------------------------------------------------------------------
+    ax1 = axes[0]
     ax1.plot(x_pos, actual, 'b-', linewidth=2.5, marker='o', markersize=8,
              label='Actual 2013 (from NetCDF)')
     ax1.plot(x_pos, predicted, 'r--', linewidth=2.5, marker='s', markersize=8,
@@ -244,24 +248,46 @@ def plot_2013_validation(actual, predicted, dates, rmse, train_losses):
     ax1.axhline(y=0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5)
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels(month_labels, rotation=45, ha='right')
-    ax1.set_ylabel('SST Anomaly (°C)', fontsize=12)
-    ax1.set_xlabel('Month', fontsize=12)
-    ax1.set_title(f'Out-of-Sample Validation: Predicted vs Actual Indonesian SST (Year 2013)\n'
-                  f'RMSE = {rmse:.4f}°C', fontsize=14, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=11)
+    ax1.set_ylabel('SST Anomaly (°C)', fontsize=11)
+    ax1.set_title(f'Out-of-Sample Validation: Indonesian SST Anomaly (Year 2013)\n'
+                  f'RMSE = {rmse:.4f}°C', fontsize=13, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=10)
     ax1.grid(True, alpha=0.3)
     
+    # -------------------------------------------------------------------------
+    # Plot 2: Niño 3.4 Index (Predictor)
+    # -------------------------------------------------------------------------
     ax2 = axes[1]
-    ax2.plot(range(1, len(train_losses)+1), train_losses, 'g-', linewidth=2)
+    
+    # Color based on El Niño / La Niña threshold
+    colors = ['coral' if v > 0.5 else 'steelblue' if v < -0.5 else 'gray' for v in nino34]
+    ax2.bar(x_pos, nino34, color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
+    
+    ax2.axhline(y=0.5, color='red', linestyle='--', linewidth=1, alpha=0.7, label='El Niño threshold (+0.5)')
+    ax2.axhline(y=-0.5, color='blue', linestyle='--', linewidth=1, alpha=0.7, label='La Niña threshold (-0.5)')
+    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
+    
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(month_labels, rotation=45, ha='right')
+    ax2.set_ylabel('Niño 3.4 Index (°C)', fontsize=11)
+    ax2.set_title('Niño 3.4 Index (Predictor from Pacific)', fontsize=13, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=9)
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # -------------------------------------------------------------------------
+    # Plot 3: Training Loss
+    # -------------------------------------------------------------------------
+    ax3 = axes[2]
+    ax3.plot(range(1, len(train_losses)+1), train_losses, 'g-', linewidth=2)
     min_loss = min(train_losses)
     min_epoch = train_losses.index(min_loss) + 1
-    ax2.scatter([min_epoch], [min_loss], color='red', s=100, zorder=5,
+    ax3.scatter([min_epoch], [min_loss], color='red', s=100, zorder=5,
                 label=f'Min Loss: {min_loss:.4f} (Epoch {min_epoch})')
-    ax2.set_xlabel('Epoch', fontsize=12)
-    ax2.set_ylabel('MSE Loss', fontsize=12)
-    ax2.set_title('Training Loss Curve (2000-2012 Data)', fontsize=14, fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=11)
-    ax2.grid(True, alpha=0.3)
+    ax3.set_xlabel('Epoch', fontsize=11)
+    ax3.set_ylabel('MSE Loss', fontsize=11)
+    ax3.set_title('Training Loss Curve (2000-2012 Data)', fontsize=13, fontweight='bold')
+    ax3.legend(loc='upper right', fontsize=10)
+    ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig('output/figures/validation_2013_results.png', dpi=150, bbox_inches='tight')
@@ -367,8 +393,9 @@ def main():
     print(f"MAE:         {mae:.4f} °C")
     print(f"Correlation: {corr:.4f}")
     
-    # Plot
-    plot_2013_validation(actual_original, pred_original, test_2013.index, rmse, train_losses)
+    # Plot with Niño 3.4
+    nino34_2013 = test_2013['nino34'].values
+    plot_2013_validation(actual_original, pred_original, test_2013.index, nino34_2013, rmse, train_losses)
     
     print("\n" + "=" * 70)
     print("VALIDATION COMPLETE")
