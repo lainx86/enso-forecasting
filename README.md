@@ -40,6 +40,19 @@ enso-forecasting/
 | Indonesian SST | NOAA OISST V2 | `data/processed/sst_indo_clean.csv` |
 | Niño 3.4 Index | NOAA ERSSTv5 | `data/raw/nina34.anom.data.txt` |
 
+### Raw NetCDF Data (Not Included)
+Folder `data_sst/` berisi file NetCDF mentah dari NOAA (~500MB per file) yang **tidak di-upload ke GitHub** karena ukuran terlalu besar.
+
+**Untuk menjalankan preprocessing dari awal:**
+1. Download data dari NOAA OISST: https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.highres.html
+2. Simpan file `sst.day.mean.YYYY.nc` di folder `data_sst/`
+3. Jalankan `python preprocessing.py`
+
+Atau jalankan:
+```bash
+python download_data.py  # Auto-download dari NOAA
+```
+
 ---
 
 ## Model Architecture
