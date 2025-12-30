@@ -97,7 +97,6 @@ python preprocessing.py
 
 # 5. Train & evaluate
 python validation_2024.py          # LSTM with Early Stopping
-python validation_2024_GRU.py      # Alternative: GRU Architecture
 ```
 
 ---
