@@ -1,15 +1,13 @@
 """
-validation_2024.py - Pure Out-of-Sample Validation for Year 2024
+validation_2025_fixed_v2.py - Recursive Forecasting (Enhanced)
 
-RECURSIVE AUTOREGRESSIVE FORECASTING:
-1. Model is trained for single-step prediction (1 month ahead)
-2. For 2024 forecast: model predicts recursively using its own predictions
-3. Niño 3.4 for 2024 uses "persistence" (last known value from Dec 2023)
+IMPROVEMENTS:
+1. Extended Lookback (48 months) to capture full ENSO cycles.
+2. Switched to HuberLoss to prevent "mean reversion" (flat predictions).
+3. Added Learning Rate Scheduler for sharper convergence.
+4. Reduced Dropout to allow stronger trend following.
 
-This is the standard approach in operational climate forecasting.
-
-Author: Feby - For Data Science Portfolio Project
-Date: December 2024
+Author: Feby - Data Science Portfolio
 """
 
 import numpy as np
@@ -37,33 +35,35 @@ if torch.cuda.is_available():
 # ============================================================================
 SST_INDO_FILE = "data/processed/sst_indo_clean.csv"
 NINO34_FILE = "data/raw/nina34.anom.data.txt"
-SST_2024_NC = "data_sst/sst.day.mean.2024.nc"
+SST_2025_NC = "data_sst/sst.day.mean.2025.nc"
 
 os.makedirs("output/models", exist_ok=True)
-CHECKPOINT_PATH = "output/models/best_model.pt"
+os.makedirs("output/figures", exist_ok=True)
+CHECKPOINT_PATH = "output/models/best_model_2025_recursive_v2.pt"
 
 # Region bounds
 LAT_MIN, LAT_MAX = -11, 6
 LON_MIN, LON_MAX = 95, 141
 
 # Model parameters
-LOOKBACK = 12       # 12 months input
-INPUT_SIZE = 2      # SST + Niño 3.4
-HIDDEN_SIZE = 32
-NUM_LAYERS = 1
-OUTPUT_SIZE = 1     # Single-step prediction
+LOOKBACK = 48         # UPGRADE: 4 tahun konteks (wajib untuk siklus ENSO)
+INPUT_SIZE = 4        # [SST, Nino, Sin, Cos]
+HIDDEN_SIZE = 128 
+NUM_LAYERS = 2
+OUTPUT_SIZE = 2       # [SST, Nino]
+DROPOUT = 0.1         # DITURUNKAN: Agar model lebih berani mengikuti tren
 
 # Training parameters
 EPOCHS = 150
-BATCH_SIZE = 4
-LEARNING_RATE = 0.005
-PATIENCE = 15
+BATCH_SIZE = 16       # NAIK: Batch lebih besar untuk gradien stabil
+LEARNING_RATE = 0.001
+PATIENCE = 25
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 # ============================================================================
-# HELPER CLASSES
+# HELPER CLASSES & FUNCTIONS
 # ============================================================================
 
 class EarlyStopping:
@@ -94,9 +94,17 @@ class EarlyStopping:
 
     def save_checkpoint(self, val_loss, model):
         if self.verbose:
-            print(f'   Val loss improved ({self.val_loss_min:.6f} → {val_loss:.6f}). Saving...')
+            print(f'   Val loss improved ({self.val_loss_min:.6f} -> {val_loss:.6f}). Saving...')
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
+
+def add_time_features(df):
+    """Menambahkan fitur waktu siklis (Sinus & Cosinus Bulan)."""
+    df = df.copy()
+    df['month'] = df.index.month
+    df['sin_month'] = np.sin(2 * np.pi * df['month'] / 12)
+    df['cos_month'] = np.cos(2 * np.pi * df['month'] / 12)
+    return df[['sst_anomaly', 'nino34', 'sin_month', 'cos_month']]
 
 
 # ============================================================================
@@ -104,7 +112,7 @@ class EarlyStopping:
 # ============================================================================
 
 def load_training_data(sst_file, nino_file):
-    """Load and merge training data (2000-2023)."""
+    """Load and merge training data with SEASONAL features."""
     sst_df = pd.read_csv(sst_file)
     sst_df['date'] = pd.to_datetime(sst_df['date'])
     sst_df = sst_df.set_index('date')
@@ -128,44 +136,37 @@ def load_training_data(sst_file, nino_file):
     nino_df = pd.DataFrame(records).set_index('date').sort_index()
     
     merged = sst_df.join(nino_df, how='inner')[['sst_anomaly', 'nino34']].dropna()
+    merged_final = add_time_features(merged)
+    
     print(f"✓ Training data: {merged.index[0]:%Y-%m} to {merged.index[-1]:%Y-%m} ({len(merged)} records)")
-    return merged, nino_df
+    return merged_final
 
 
-def load_2024_from_netcdf(nc_file, nino_df):
-    """Load 2024 SST from raw NetCDF."""
+def load_2025_sst_only(nc_file, train_df):
+    """Load 2025 SST Ground Truth."""
     ds = xr.open_dataset(nc_file)
     ds_indo = ds.sel(lat=slice(LAT_MIN, LAT_MAX), lon=slice(LON_MIN, LON_MAX))
     ds_monthly = ds_indo.resample(time='MS').mean(dim='time')
     sst_mean = ds_monthly['sst'].mean(dim=['lat', 'lon'])
     
-    df_2024 = pd.DataFrame({
+    df_2025 = pd.DataFrame({
         'date': pd.to_datetime(sst_mean['time'].values),
         'sst_actual': sst_mean.values
     }).set_index('date')
-    
-    nino_2024 = nino_df.loc[nino_df.index.year == 2024]
-    df_2024 = df_2024.join(nino_2024, how='inner')
     ds.close()
     
-    print(f"✓ Test data: {df_2024.index[0]:%Y-%m} to {df_2024.index[-1]:%Y-%m} ({len(df_2024)} records)")
-    return df_2024
-
-
-def calculate_anomaly_for_2024(train_df, test_2024):
-    """Calculate 2024 anomaly using training climatology."""
+    # Climatology calculation
     train_sst = pd.read_csv(SST_INDO_FILE)
     train_sst['date'] = pd.to_datetime(train_sst['date'])
     train_sst['month'] = train_sst['date'].dt.month
     climatology = train_sst.groupby('month')['sst_actual'].mean()
     
-    test_2024 = test_2024.copy()
-    test_2024['month'] = test_2024.index.month
-    test_2024['climatology'] = test_2024['month'].map(climatology)
-    test_2024['sst_anomaly'] = test_2024['sst_actual'] - test_2024['climatology']
+    df_2025['month'] = df_2025.index.month
+    df_2025['climatology'] = df_2025['month'].map(climatology)
+    df_2025['sst_anomaly'] = df_2025['sst_actual'] - df_2025['climatology']
     
-    print(f"  2024 SST Anomaly: {test_2024['sst_anomaly'].min():.2f}°C to {test_2024['sst_anomaly'].max():.2f}°C")
-    return test_2024[['sst_anomaly', 'nino34']]
+    print(f"✓ Test data (2025): {df_2025.index[0]:%Y-%m} to {df_2025.index[-1]:%Y-%m} ({len(df_2025)} records)")
+    return df_2025[['sst_anomaly']]
 
 
 # ============================================================================
@@ -173,13 +174,17 @@ def calculate_anomaly_for_2024(train_df, test_2024):
 # ============================================================================
 
 class LSTMForecaster(nn.Module):
-    """LSTM for single-step time series forecasting."""
-    def __init__(self, input_size=2, hidden_size=32, num_layers=1, output_size=1):
+    def __init__(self, input_size=4, hidden_size=128, num_layers=2, output_size=2, dropout=0.1):
         super(LSTMForecaster, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
-                           num_layers=num_layers, batch_first=True)
+        
+        self.lstm = nn.LSTM(input_size=input_size, 
+                            hidden_size=hidden_size,
+                            num_layers=num_layers, 
+                            batch_first=True,
+                            dropout=dropout if num_layers > 1 else 0)
+                            
         self.fc = nn.Linear(hidden_size, output_size)
     
     def forward(self, x):
@@ -190,28 +195,29 @@ class LSTMForecaster(nn.Module):
 
 
 def create_sequences(data, lookback):
-    """Create sequences for single-step prediction."""
     X, y = [], []
     for i in range(lookback, len(data)):
-        X.append(data[i-lookback:i, :])  # All features
-        y.append(data[i, 0])              # SST only
-    return np.array(X), np.array(y).reshape(-1, 1)
+        X.append(data[i-lookback:i, :])
+        y.append(data[i, :2]) 
+    return np.array(X), np.array(y)
 
 
 def train_model(model, train_loader, val_loader, epochs, lr):
-    """Train with early stopping."""
-    criterion = nn.MSELoss()
+    # UPGRADE: HuberLoss lebih toleran terhadap outlier daripada MSE, mencegah prediksi menjadi 'flat'
+    criterion = nn.HuberLoss(delta=1.0) 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    # UPGRADE: Scheduler untuk menurunkan LR jika validasi macet
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
     early_stopping = EarlyStopping(patience=PATIENCE, verbose=True, path=CHECKPOINT_PATH)
     
     train_losses, val_losses = [], []
     
     print("\n" + "=" * 50)
-    print(f"TRAINING (Patience={PATIENCE})")
+    print(f"TRAINING (Lookback={LOOKBACK}, Loss=Huber)")
     print("=" * 50)
     
     for epoch in range(epochs):
-        # Train
         model.train()
         batch_loss = []
         for X_b, y_b in train_loader:
@@ -224,7 +230,6 @@ def train_model(model, train_loader, val_loader, epochs, lr):
             batch_loss.append(loss.item())
         train_losses.append(np.mean(batch_loss))
         
-        # Validate
         model.eval()
         batch_val_loss = []
         with torch.no_grad():
@@ -232,6 +237,9 @@ def train_model(model, train_loader, val_loader, epochs, lr):
                 pred = model(X_v)
                 batch_val_loss.append(criterion(pred, y_v).item())
         val_losses.append(np.mean(batch_val_loss))
+        
+        # Step Scheduler
+        scheduler.step(val_losses[-1])
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"Epoch [{epoch+1:3d}/{epochs}] Train: {train_losses[-1]:.6f} | Val: {val_losses[-1]:.6f}")
@@ -252,99 +260,95 @@ def train_model(model, train_loader, val_loader, epochs, lr):
 # ============================================================================
 
 def recursive_forecast(model, initial_sequence, scaler, n_months=12):
-    """
-    Perform recursive autoregressive forecasting.
-    
-    Args:
-        model: Trained LSTM model
-        initial_sequence: Last 12 months of scaled data, shape (12, 2)
-        scaler: Fitted MinMaxScaler
-        n_months: Number of months to forecast
-    
-    Returns:
-        predictions: Array of predictions in original scale
-    """
     model.eval()
+    current_seq = initial_sequence.copy()
     
-    # Copy to avoid modifying original
-    current_seq = initial_sequence.copy()  # Shape: (12, 2)
-    
-    # Get last known Niño 3.4 value for persistence
-    last_nino_scaled = current_seq[-1, 1]
+    # Mulai dari Januari 2025
+    next_month_idx = 1 
     
     predictions_scaled = []
     
-    print("\n  Recursive forecasting:")
+    print("\n  Recursive Forecasting (Enhanced):")
+    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    
     for month in range(n_months):
-        # Prepare input
-        X = torch.FloatTensor(current_seq).unsqueeze(0).to(DEVICE)  # Shape: (1, 12, 2)
+        X = torch.FloatTensor(current_seq).unsqueeze(0).to(DEVICE)
         
-        # Predict next SST
         with torch.no_grad():
-            pred_sst = model(X).cpu().numpy().flatten()[0]
+            pred_core = model(X).cpu().numpy().flatten()
         
-        predictions_scaled.append(pred_sst)
+        predictions_scaled.append(pred_core)
         
-        # Shift window and update
-        # New row: [predicted_sst, persisted_nino]
-        new_row = np.array([pred_sst, last_nino_scaled])
+        # Update Input
+        sin_feat = np.sin(2 * np.pi * next_month_idx / 12)
+        cos_feat = np.cos(2 * np.pi * next_month_idx / 12)
+        
+        new_row = np.array([pred_core[0], pred_core[1], sin_feat, cos_feat])
         current_seq = np.vstack([current_seq[1:], new_row])
         
-        month_name = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month]
-        print(f"    {month_name} 2024: predicted (scaled={pred_sst:.4f})")
+        if month < len(months):
+             print(f"    {months[month]} 2025: SST={pred_core[0]:.3f} | Nino={pred_core[1]:.3f}")
+        
+        next_month_idx += 1
     
-    # Inverse transform
     predictions_scaled = np.array(predictions_scaled)
-    pred_full = np.zeros((len(predictions_scaled), 2))
-    pred_full[:, 0] = predictions_scaled
-    pred_full[:, 1] = last_nino_scaled  # Dummy for inverse transform
-    predictions = scaler.inverse_transform(pred_full)[:, 0]
+    predictions_full = scaler.inverse_transform(predictions_scaled)
     
-    return predictions
+    return predictions_full[:, 0], predictions_full[:, 1]
 
 
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
 
-def plot_results(actual, predicted, dates, rmse, train_losses, val_losses):
-    """Plot results."""
-    fig, axes = plt.subplots(2, 1, figsize=(12, 9), dpi=100)
+def plot_results(actual, predicted, pred_nino, dates, rmse, train_losses, val_losses):
+    fig, axes = plt.subplots(3, 1, figsize=(12, 12), dpi=100)
     
     months = [d.strftime('%b %Y') for d in dates]
     x = range(len(dates))
     
-    # Plot 1: Predictions
+    # Plot 1: SST Comparison
     ax1 = axes[0]
-    ax1.plot(x, actual, 'b-o', linewidth=2.5, markersize=8, label='Actual 2024')
-    ax1.plot(x, predicted, 'r--s', linewidth=2.5, markersize=8, label='LSTM Recursive Forecast')
+    ax1.plot(x, actual, 'b-o', linewidth=2.5, markersize=8, label='Actual 2025')
+    ax1.plot(x, predicted, 'r--s', linewidth=2.5, markersize=8, label='Forecast (Recursive)')
     ax1.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
     ax1.set_xticks(x)
     ax1.set_xticklabels(months, rotation=45, ha='right')
     ax1.set_ylabel('SST Anomaly (°C)')
-    ax1.set_title(f'Recursive Autoregressive Forecasting: Indonesian SST (2024)\n'
-                  f'RMSE = {rmse:.4f}°C | Pure forecasting (no 2024 data used)', fontweight='bold')
+    ax1.set_title(f'SST Forecast 2025 (Improved Recursive)\nRMSE = {rmse:.4f}°C', fontweight='bold')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Loss
+    # Plot 2: Predicted Nino Trajectory
     ax2 = axes[1]
-    ax2.plot(train_losses, 'g-', label='Training Loss')
-    ax2.plot(val_losses, 'orange', linestyle='--', label='Validation Loss')
-    min_val = min(val_losses)
-    best_ep = val_losses.index(min_val)
-    ax2.scatter([best_ep], [min_val], color='red', s=100, zorder=5, label=f'Best (Epoch {best_ep+1})')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('MSE Loss')
-    ax2.set_title('Training Progress', fontweight='bold')
-    ax2.legend()
+    ax2.plot(x, pred_nino, 'purple', linestyle='--', marker='^', label='Predicted Niño 3.4')
+    ax2.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+    ax2.fill_between(x, 0.5, 3.0, color='red', alpha=0.1, label='El Niño Zone')
+    ax2.fill_between(x, -0.5, -3.0, color='blue', alpha=0.1, label='La Niña Zone')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(months, rotation=45, ha='right')
+    ax2.set_ylabel('Niño 3.4 Index')
+    ax2.set_title('Internal Niño 3.4 Forecast', fontweight='bold')
+    ax2.legend(loc='upper right')
     ax2.grid(True, alpha=0.3)
     
+    # Plot 3: Loss
+    ax3 = axes[2]
+    ax3.plot(train_losses, 'g-', label='Training Loss')
+    ax3.plot(val_losses, 'orange', linestyle='--', label='Validation Loss')
+    min_val = min(val_losses)
+    best_ep = val_losses.index(min_val)
+    ax3.scatter([best_ep], [min_val], color='red', s=100, zorder=5, label=f'Best (Epoch {best_ep+1})')
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('Huber Loss')
+    ax3.set_title('Training Progress', fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    plt.savefig('output/figures/validation_2024_results.png', dpi=150, bbox_inches='tight')
+    plt.savefig('output/figures/validation_2025_improved.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"\n✓ Saved: output/figures/validation_2024_results.png")
+    print(f"\n✓ Saved: output/figures/validation_2025_improved.png")
 
 
 # ============================================================================
@@ -353,36 +357,36 @@ def plot_results(actual, predicted, dates, rmse, train_losses, val_losses):
 
 def main():
     print("=" * 70)
-    print("RECURSIVE AUTOREGRESSIVE FORECASTING: Year 2024")
-    print("Model predicts 1 month at a time, using its own predictions as input")
-    print("Niño 3.4 uses persistence (last known value from Dec 2023)")
+    print("RECURSIVE FORECASTING v2 (IMPROVED)")
+    print("Improvements: Lookback=48, HuberLoss, LR Scheduler")
     print("=" * 70)
     
     # 1. Load Data
-    print("\n[Step 1/6] Loading data...")
-    train_df, nino_df = load_training_data(SST_INDO_FILE, NINO34_FILE)
-    test_2024_raw = load_2024_from_netcdf(SST_2024_NC, nino_df)
-    test_2024 = calculate_anomaly_for_2024(train_df, test_2024_raw)
+    print("\n[Step 1/6] Loading training data...")
+    train_df = load_training_data(SST_INDO_FILE, NINO34_FILE)
+    test_2025 = load_2025_sst_only(SST_2025_NC, train_df)
     
     # 2. Normalize
     print("\n[Step 2/6] Normalizing...")
     scaler = MinMaxScaler(feature_range=(-1, 1))
-    train_scaled = scaler.fit_transform(train_df.values)
-    test_scaled = scaler.transform(test_2024.values)
     
-    # 3. Create sequences (single-step)
+    data_values = train_df.values
+    data_core = data_values[:, :2]  # SST, Nino
+    data_time = data_values[:, 2:]  # Sin, Cos
+    
+    data_core_scaled = scaler.fit_transform(data_core)
+    train_scaled = np.hstack([data_core_scaled, data_time])
+    
+    # 3. Create sequences
     print("\n[Step 3/6] Creating sequences...")
     X_full, y_full = create_sequences(train_scaled, LOOKBACK)
     
-    # 4. Train/Val split
-    train_size = int(len(X_full) * 0.8)
+    train_size = int(len(X_full) * 0.9) # Perbanyak data training
     X_train, y_train = X_full[:train_size], y_full[:train_size]
     X_val, y_val = X_full[train_size:], y_full[train_size:]
     
-    print(f"  Training samples: {len(X_train)}")
-    print(f"  Validation samples: {len(X_val)}")
+    print(f"  Training samples: {len(X_train)} | Validation: {len(X_val)}")
     
-    # Tensors & Loaders
     X_train_t = torch.FloatTensor(X_train).to(DEVICE)
     y_train_t = torch.FloatTensor(y_train).to(DEVICE)
     X_val_t = torch.FloatTensor(X_val).to(DEVICE)
@@ -391,53 +395,41 @@ def main():
     train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=BATCH_SIZE, shuffle=False)
     
-    # 5. Train
+    # 4. Train
     print("\n[Step 4/6] Training...")
-    model = LSTMForecaster(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE).to(DEVICE)
-    print(f"  Model: LSTMForecaster(in={INPUT_SIZE}, hidden={HIDDEN_SIZE}, out={OUTPUT_SIZE})")
+    model = LSTMForecaster(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE, DROPOUT).to(DEVICE)
     train_losses, val_losses = train_model(model, train_loader, val_loader, EPOCHS, LEARNING_RATE)
     
-    # 6. Recursive Forecast
-    print("\n[Step 5/6] Forecasting 2024 (recursive)...")
-    print("  Input: Jan-Dec 2023 (last 12 months of training)")
-    print("  Niño 3.4: Using persistence (Dec 2023 value repeated)")
+    # 5. Forecast
+    print("\n[Step 5/6] Forecasting 2025...")
+    initial_seq = train_scaled[-LOOKBACK:] 
+    n_months_to_predict = len(test_2025)
     
-    initial_seq = train_scaled[-LOOKBACK:]  # Last 12 months: Jan-Dec 2023
-    predictions = recursive_forecast(model, initial_seq, scaler, n_months=12)
-    
-    # Actual values
-    actual = test_2024['sst_anomaly'].values
+    pred_sst, pred_nino = recursive_forecast(model, initial_seq, scaler, n_months=n_months_to_predict)
     
     # Metrics
-    rmse = np.sqrt(np.mean((predictions - actual) ** 2))
-    mae = np.mean(np.abs(predictions - actual))
-    corr = np.corrcoef(actual, predictions)[0, 1]
+    actual_sst = test_2025['sst_anomaly'].values[:n_months_to_predict]
+    pred_sst = pred_sst[:len(actual_sst)]
+    pred_nino = pred_nino[:len(actual_sst)]
+    
+    rmse = np.sqrt(np.mean((pred_sst - actual_sst) ** 2))
+    mae = np.mean(np.abs(pred_sst - actual_sst))
+    corr = np.corrcoef(actual_sst, pred_sst)[0, 1] if len(actual_sst) > 1 else 0
     
     print("\n" + "=" * 50)
-    print("2024 PURE FORECASTING METRICS")
+    print("2025 FORECASTING METRICS")
     print("=" * 50)
     print(f"RMSE:        {rmse:.4f} °C")
     print(f"MAE:         {mae:.4f} °C")
     print(f"Correlation: {corr:.4f}")
     
-    # Monthly breakdown
-    print("\n Monthly Results:")
-    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    for i, m in enumerate(months):
-        if i < len(predictions):
-            err = predictions[i] - actual[i]
-            print(f"  {m}: Pred={predictions[i]:+.3f}°C | Actual={actual[i]:+.3f}°C | Error={err:+.3f}°C")
-    
-    # Plot
-    print("\n[Step 6/6] Plotting...")
-    plot_results(actual, predictions, test_2024.index, rmse, train_losses, val_losses)
+    plot_results(actual_sst, pred_sst, pred_nino, test_2025.index[:len(pred_sst)], rmse, train_losses, val_losses)
     
     print("\n" + "=" * 70)
     print("VALIDATION COMPLETE")
     print("=" * 70)
     
     return model, scaler
-
 
 if __name__ == "__main__":
     model, scaler = main()

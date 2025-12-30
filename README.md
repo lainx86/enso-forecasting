@@ -5,7 +5,7 @@
 ![Oceanography](https://img.shields.io/badge/Domain-Oceanography-teal)
 
 ## Project Overview
-Proyek ini memprediksi **Anomali Suhu Permukaan Laut (SST)** di perairan Indonesia menggunakan **Multivariate LSTM**. Model memanfaatkan **Niño 3.4 Index** sebagai prediktor eksternal untuk menangkap fenomena **El Niño-Southern Oscillation (ENSO)**.
+Proyek ini memprediksi **Anomali Suhu Permukaan Laut (SST)** di perairan Indonesia menggunakan **Multivariate LSTM dengan Recursive Forecasting**. Model memanfaatkan **Niño 3.4 Index** sebagai prediktor dinamis untuk menangkap fenomena **El Niño-Southern Oscillation (ENSO)**.
 
 ---
 
@@ -21,16 +21,15 @@ enso-forecasting/
 ├── data_sst/                   # Raw NetCDF files (gitignored)
 ├── output/
 │   ├── figures/                # Generated plots and visualizations
-│   │   ├── validation_2024_results.png
+│   │   ├── validation_2025_improved.png
 │   │   └── sst_anomaly_trend.png
 │   └── models/                 # Saved model checkpoints
-│       └── best_model.pt
+│       └── best_model_2025_recursive_v2.pt
 ├── docs/                       # Documentation
 │   └── TECHNICAL_DOCUMENTATION.md
 ├── download_data.py            # Download NetCDF from NOAA
 ├── preprocessing.py            # ETL: NetCDF → CSV
-├── validation_2024.py          # Main Script: Out-of-Sample Testing (Train: 2000-2023, Test: 2024)
-└── validation_2024_GRU.py      # Alternative: GRU Architecture
+└── validation_2025.py          # Main Script: Recursive Forecasting (Train: 2000-2024, Test: 2025)
 ```
 
 ---
@@ -52,31 +51,47 @@ Folder `data_sst/` berisi file NetCDF mentah dari NOAA (~500MB per file) yang **
 
 ## Training Approach
 
-Script utama `validation_2024.py` menggunakan **TRUE out-of-sample validation**:
-- **Training Data**: 2000-2023 (split internal 80% train / 20% validation untuk early stopping)
-- **Test Data**: 2024 (diambil langsung dari raw NetCDF, tidak pernah dilihat saat training)
-- **Early Stopping**: Training berhenti otomatis jika validation loss tidak membaik selama 15 epoch
+Script `validation_2025.py` menggunakan **Recursive Autoregressive Forecasting**:
+- **Training Data**: 2000-2024 (split 90% train / 10% validation)
+- **Test Data**: 2025 (diambil langsung dari raw NetCDF, tidak pernah dilihat saat training)
+- **Metode**: Model memprediksi 1 bulan, lalu menggunakan prediksinya sendiri sebagai input bulan berikutnya
+- **Niño 3.4**: Diprediksi secara internal (bukan dari data aktual masa depan)
 
-> Pendekatan ini mensimulasikan skenario forecasting nyata dimana kita memprediksi masa depan yang benar-benar belum diketahui.
+> **Pure Forecasting**: Tidak ada data 2025 yang dipakai saat inference - mensimulasikan skenario nyata memprediksi masa depan.
 
 ---
 
-## Model Architecture
+## Model Architecture (v2 - Enhanced)
 
-| Parameter | Value |
-|-----------|-------|
-| Type | Multivariate LSTM |
-| Input Features | 2 (SST Indo + Niño 3.4) |
-| Lookback Window | 12 months |
-| Hidden Size | 32 |
-| Output | 1 (Indonesian SST Anomaly) |
+| Parameter | v1 (Old) | v2 (Current) |
+|-----------|----------|--------------|
+| **Lookback Window** | 12 months | 48 months (4 tahun konteks ENSO) |
+| **Input Features** | 2 (SST, Niño) | 4 (SST, Niño, Sin Month, Cos Month) |
+| **Output** | 1 (SST only) | 2 (SST + Niño dinamis) |
+| **Hidden Size** | 32 | 128 |
+| **Layers** | 1 | 2 |
+| **Loss Function** | MSE | Huber Loss |
+| **LR Scheduler** | None | ReduceLROnPlateau |
+
+### Key Improvements:
+1. **Extended Lookback (48 bulan)** - Menangkap siklus ENSO penuh (2-7 tahun)
+2. **Cyclic Time Features (Sin/Cos)** - Menangkap pola musiman
+3. **Multivariate Output** - Memprediksi SST + Niño secara bersamaan
+4. **HuberLoss** - Mencegah "mean reversion" yang menyebabkan prediksi flat
+5. **LR Scheduler** - Konvergensi lebih tajam
 
 ---
 
 ## Results
 
-### Out-of-Sample Validation (Year 2024)
-![Validation Results](output/figures/validation_2024_results.png)
+### Out-of-Sample Validation (Year 2025)
+![Validation Results](output/figures/validation_2025_improved.png)
+
+| Metric | v1 (Old) | v2 (Current) | Improvement |
+|--------|----------|--------------|-------------|
+| **RMSE** | 0.27°C | 0.1060°C | **↓ 60%** |
+| **MAE** | ~0.20°C | 0.0843°C | **↓ 58%** |
+| **Correlation** | ~0.3 | 0.6377 | **↑ 2x** |
 
 ---
 
@@ -89,6 +104,7 @@ cd enso-forecasting
 
 # 2. Install dependencies
 pip install -r requirements.txt
+
 # 3. Download Data
 python download_data.py
 
@@ -96,7 +112,7 @@ python download_data.py
 python preprocessing.py
 
 # 5. Train & evaluate
-python validation_2024.py          # LSTM with Early Stopping
+python validation_2025.py          # Recursive LSTM Forecasting
 ```
 
 ---

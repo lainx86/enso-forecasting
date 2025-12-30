@@ -26,7 +26,7 @@ from datetime import datetime
 # CONFIGURATION
 # ============================================================================
 START_YEAR = 2000
-END_YEAR = 2023
+END_YEAR = 2024
 DATA_DIR = "data_sst"
 OUTPUT_FILE = "data/processed/sst_indo_clean.csv"
 
