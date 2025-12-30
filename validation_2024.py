@@ -45,19 +45,20 @@ CHECKPOINT_PATH = "output/models/best_model.pt"
 LAT_MIN, LAT_MAX = -11, 6
 LON_MIN, LON_MAX = 95, 141
 
-LOOKBACK = 12
+LOOKBACK = 12       # Input: 12 months of history
+FORECAST_HORIZON = 12  # Output: 12 months ahead (entire year)
 
 # Model hyperparameters
 INPUT_SIZE = 2
-HIDDEN_SIZE = 32
-NUM_LAYERS = 1
-OUTPUT_SIZE = 1
+HIDDEN_SIZE = 64    # Increased for multi-output complexity
+NUM_LAYERS = 2      # Deeper network for multi-step
+OUTPUT_SIZE = FORECAST_HORIZON  # Predict 12 months at once
 
 # Training parameters
-EPOCHS = 150
-BATCH_SIZE = 4
-LEARNING_RATE = 0.005
-PATIENCE = 15  # Stop if no improvement after 15 epochs
+EPOCHS = 200
+BATCH_SIZE = 8
+LEARNING_RATE = 0.003
+PATIENCE = 20  # Stop if no improvement after 20 epochs
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -178,28 +179,64 @@ def calculate_anomaly_for_2024(train_df: pd.DataFrame, test_2024: pd.DataFrame) 
 # MODEL & TRAINING
 # ============================================================================
 
-class MultivariateLSTM(nn.Module):
-    def __init__(self, input_size=2, hidden_size=32, num_layers=1, output_size=1):
-        super(MultivariateLSTM, self).__init__()
+class Seq2SeqLSTM(nn.Module):
+    """
+    Encoder-Decoder LSTM for Multi-Step Forecasting.
+    Input: 12 months of (SST + Niño 3.4)
+    Output: 12 months of SST predictions
+    """
+    def __init__(self, input_size=2, hidden_size=64, num_layers=2, output_size=12):
+        super(Seq2SeqLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
-                           num_layers=num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
+        
+        # Encoder LSTM
+        self.encoder = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                               num_layers=num_layers, batch_first=True, dropout=0.2)
+        
+        # Decoder layers
+        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.2)
+        self.fc2 = nn.Linear(hidden_size, output_size)  # Output 12 values
     
     def forward(self, x):
+        # Encoder: process input sequence
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        lstm_out, _ = self.lstm(x, (h0, c0))
-        return self.fc(lstm_out[:, -1, :])
+        
+        encoder_out, (hidden, cell) = self.encoder(x, (h0, c0))
+        
+        # Use the final hidden state to decode
+        context = encoder_out[:, -1, :]  # Last timestep output
+        
+        # Decoder: produce multi-step forecast
+        out = self.fc1(context)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)  # Shape: (batch, 12)
+        
+        return out
 
 
-def create_sequences(data: np.ndarray, lookback: int):
+def create_sequences_multistep(data: np.ndarray, lookback: int, horizon: int):
+    """
+    Create sequences for multi-step forecasting.
+    
+    Args:
+        data: Array with shape (timesteps, features)
+        lookback: Number of input timesteps (12)
+        horizon: Number of output timesteps (12)
+    
+    Returns:
+        X: (samples, lookback, features)
+        y: (samples, horizon) - only SST column
+    """
     X, y = [], []
-    for i in range(lookback, len(data)):
-        X.append(data[i-lookback:i, :])
-        y.append(data[i, 0])
-    return np.array(X), np.array(y).reshape(-1, 1)
+    for i in range(lookback, len(data) - horizon + 1):
+        X.append(data[i-lookback:i, :])           # Input: 12 months, all features
+        y.append(data[i:i+horizon, 0])            # Target: next 12 months, SST only
+    return np.array(X), np.array(y)
 
 
 def train_model(model, train_loader, val_loader, epochs, lr):
@@ -315,9 +352,8 @@ def plot_2024_validation(actual, predicted, dates, rmse, train_losses, val_losse
 
 def main():
     print("=" * 70)
-    print("TRUE OUT-OF-SAMPLE VALIDATION: Year 2024")
-    print("Training: 2000-2023 (Split 80% Train / 20% Val)")
-    print("Testing:  2024 (raw NetCDF - never seen by model)")
+    print("MULTI-STEP DIRECT FORECASTING: Year 2024")
+    print("Model predicts ALL 12 months of 2024 from 12 months of 2023")
     print("=" * 70)
     
     # 1. Load Data
@@ -336,41 +372,38 @@ def main():
     train_scaled = scaler.fit_transform(train_df.values)
     test_scaled = scaler.transform(test_2024.values)
     
-    # 3. Create Sequences
-    # We first create sequences from the FULL training data (2000-2023)
-    X_full_train, y_full_train = create_sequences(train_scaled, LOOKBACK)
+    # 3. Create MULTI-STEP Sequences
+    # Each sample: Input = 12 months, Output = next 12 months
+    print(f"  Creating multi-step sequences (lookback={LOOKBACK}, horizon={FORECAST_HORIZON})...")
+    X_full, y_full = create_sequences_multistep(train_scaled, LOOKBACK, FORECAST_HORIZON)
     
-    # 4. SPLIT TRAIN vs VALIDATION (80/20) - Time Series Split (No Shuffle)
-    train_size = int(len(X_full_train) * 0.8)
+    print(f"  Total sequences: {len(X_full)}")
+    print(f"  X shape: {X_full.shape} (samples, lookback, features)")
+    print(f"  y shape: {y_full.shape} (samples, horizon)")
     
-    X_train = X_full_train[:train_size]
-    y_train = y_full_train[:train_size]
+    # 4. SPLIT TRAIN vs VALIDATION (80/20)
+    train_size = int(len(X_full) * 0.8)
     
-    X_val = X_full_train[train_size:]
-    y_val = y_full_train[train_size:]
+    X_train = X_full[:train_size]
+    y_train = y_full[:train_size]
     
-    print(f"  Data Split Summary:")
-    print(f"   - Training Set   : {X_train.shape[0]} samples (Learning)")
-    print(f"   - Validation Set : {X_val.shape[0]} samples (Early Stopping Check)")
+    X_val = X_full[train_size:]
+    y_val = y_full[train_size:]
     
-    # Prepare Test Data (2024) - PURE FORECASTING
-    # For ALL predictions in 2024, we ONLY use data up to Dec 2023
-    # This simulates real forecasting where we don't have future data
-    X_test, y_test = [], []
+    print(f"\n  Data Split:")
+    print(f"   - Training   : {X_train.shape[0]} samples")
+    print(f"   - Validation : {X_val.shape[0]} samples")
     
-    # Use the same input (last 12 months of training) for ALL 2024 predictions
-    # This is "direct multi-step forecasting" - no recursive/autoregressive updates
-    last_12_months_training = train_scaled[-LOOKBACK:]  # Dec 2022 - Nov 2023
+    # 5. Prepare Test Input (2024)
+    # Use ONLY the last 12 months of 2023 (Jan-Dec 2023) as input
+    # Model will output prediction for all 12 months of 2024
+    X_test = train_scaled[-LOOKBACK:].reshape(1, LOOKBACK, -1)  # Shape: (1, 12, 2)
+    y_test = test_scaled[:, 0]  # Actual SST anomaly for 2024, shape: (12,)
     
-    for i in range(len(test_scaled)):
-        X_test.append(last_12_months_training)  # Same input for all months
-        y_test.append(test_scaled[i, 0])        # Actual 2024 values as target
-    
-    X_test = np.array(X_test)
-    y_test = np.array(y_test).reshape(-1, 1)
-    
-    print(f"  [PURE FORECASTING] Using only Dec 2022 - Nov 2023 data for prediction")
-    print(f"  No 2024 data is seen by the model during inference")
+    print(f"\n  [PURE FORECASTING]")
+    print(f"   Input: Jan-Dec 2023 (last 12 months of training)")
+    print(f"   Output: Predict Jan-Dec 2024 (12 months at once)")
+    print(f"   → No 2024 data seen during inference!")
     
     # Tensor Conversion
     X_train_t = torch.FloatTensor(X_train).to(DEVICE)
@@ -378,35 +411,37 @@ def main():
     X_val_t   = torch.FloatTensor(X_val).to(DEVICE)
     y_val_t   = torch.FloatTensor(y_val).to(DEVICE)
     X_test_t  = torch.FloatTensor(X_test).to(DEVICE)
-    y_test_t  = torch.FloatTensor(y_test).to(DEVICE)
     
     # DataLoaders
-    # Shuffle=False is generally safer for Time Series validation, but True is OK for training sets in LSTM
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     
     val_dataset = TensorDataset(X_val_t, y_val_t)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    # 5. Train
-    print("\n[Step 5/6] Training model...")
-    model = MultivariateLSTM(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE).to(DEVICE)
+    # 6. Train
+    print("\n[Step 5/6] Training Seq2Seq model...")
+    model = Seq2SeqLSTM(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE).to(DEVICE)
+    print(f"  Model: Seq2SeqLSTM(input={INPUT_SIZE}, hidden={HIDDEN_SIZE}, layers={NUM_LAYERS}, output={OUTPUT_SIZE})")
     train_losses, val_losses = train_model(model, train_loader, val_loader, EPOCHS, LEARNING_RATE)
     
-    # 6. Evaluate
-    print("\n[Step 6/6] Evaluating on Year 2024 (using best saved model)...")
+    # 7. Predict 2024
+    print("\n[Step 6/6] Predicting Year 2024...")
     model.eval()
     with torch.no_grad():
-        pred_scaled = model(X_test_t).cpu().numpy()
+        pred_scaled = model(X_test_t).cpu().numpy().flatten()  # Shape: (12,)
     
     # Inverse Transform
     n_features = scaler.n_features_in_
+    
+    # Predictions
     pred_full = np.zeros((len(pred_scaled), n_features))
-    pred_full[:, 0] = pred_scaled.flatten()
+    pred_full[:, 0] = pred_scaled
     pred_original = scaler.inverse_transform(pred_full)[:, 0]
     
+    # Actuals
     actual_full = np.zeros((len(y_test), n_features))
-    actual_full[:, 0] = y_test.flatten()
+    actual_full[:, 0] = y_test
     actual_original = scaler.inverse_transform(actual_full)[:, 0]
     
     # Metrics
@@ -415,11 +450,19 @@ def main():
     corr = np.corrcoef(actual_original, pred_original)[0, 1]
     
     print("\n" + "=" * 50)
-    print("2024 OUT-OF-SAMPLE METRICS")
+    print("2024 OUT-OF-SAMPLE METRICS (Pure Forecasting)")
     print("=" * 50)
     print(f"RMSE:        {rmse:.4f} °C")
     print(f"MAE:         {mae:.4f} °C")
     print(f"Correlation: {corr:.4f}")
+    
+    # Print monthly predictions
+    print("\n Monthly Predictions vs Actual:")
+    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    for i, m in enumerate(months):
+        if i < len(pred_original):
+            diff = pred_original[i] - actual_original[i]
+            print(f"  {m} 2024: Pred={pred_original[i]:+.3f}°C, Actual={actual_original[i]:+.3f}°C, Error={diff:+.3f}°C")
     
     # Plot
     plot_2024_validation(actual_original, pred_original, test_2024.index, rmse, train_losses, val_losses)
