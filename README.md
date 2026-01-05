@@ -4,6 +4,8 @@
 ![PyTorch](https://img.shields.io/badge/Deep%20Learning-PyTorch-red)
 ![Oceanography](https://img.shields.io/badge/Domain-Oceanography-teal)
 
+## This project was initiated and primarily developed by [Feby](github.com/lainx86) as part of Ekman Labs.
+
 ## Project Overview
 Proyek ini memprediksi **Suhu Permukaan Laut (SST)** di perairan Indonesia menggunakan **Multivariate LSTM dengan Recursive Forecasting**. Model memanfaatkan **Niño 3.4 Index** sebagai prediktor dinamis untuk menangkap fenomena **El Niño-Southern Oscillation (ENSO)**.
 
